@@ -76,10 +76,12 @@ jobs:
           # attacker-controlled text and `${{ }}` splices it in before the
           # shell ever sees it
           BRANCH_REF: ${{ inputs.branch_ref }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           PGOVERLAY_TOKEN: ${{ secrets.PGOVERLAY_TOKEN }}
         run: |
-          BRANCH=$(echo "$BRANCH_REF" | tr '[:upper:]' '[:lower:]' \
-            | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-41 | sed 's/-*$//')
+          # the name pgoverlay-github gave the PR's branch (git-branch naming,
+          # falling back to the PR number): gh-<repo-key>-<ref>
+          BRANCH=$(./scripts/pgoverlay-branch.sh "$GITHUB_REPOSITORY" "$BRANCH_REF" "$PR_NUMBER")
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "Waiting for pgoverlay branch '$BRANCH' (created by the webhook)…"
           for i in $(seq 1 60); do
