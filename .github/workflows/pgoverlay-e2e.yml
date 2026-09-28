@@ -27,7 +27,7 @@ on:
       pgoverlay_ref:
         description: pgoverlay git ref to build branchd and pgb from
         required: false
-        default: v1-hardening
+        default: main
   pull_request:
 
 permissions:
@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PGOVERLAY_REF: ${{ inputs.pgoverlay_ref || 'v1-hardening' }}
+  PGOVERLAY_REF: ${{ inputs.pgoverlay_ref || 'main' }}
   PGOVERLAY_SERVER: http://127.0.0.1:7070
   SOURCE_PASSWORD: e2e-source-password
   # production is at 0002; 0003 (dedupe + UNIQUE (email)) is what CI proves
@@ -171,7 +171,7 @@ jobs:
 
       - name: Create a branch (pgoverlay action)
         id: branch
-        uses: abd-ulbasit/pgoverlay/action@v1-hardening
+        uses: abd-ulbasit/pgoverlay/action@main
         with:
           server: ${{ env.PGOVERLAY_SERVER }}
           token: ${{ env.PGOVERLAY_TOKEN }}
@@ -259,7 +259,7 @@ jobs:
 
       - name: Destroy the branch (pgoverlay action)
         if: always()
-        uses: abd-ulbasit/pgoverlay/action/destroy@v1-hardening
+        uses: abd-ulbasit/pgoverlay/action/destroy@main
         with:
           server: ${{ env.PGOVERLAY_SERVER }}
           token: ${{ env.PGOVERLAY_TOKEN }}
