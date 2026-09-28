@@ -158,15 +158,12 @@ jobs:
         env:
           PGPASSWORD: ${{ env.SOURCE_PASSWORD }}
         run: |
+          # seeding (pg_basebackup) is synchronous: this returns once the
+          # source is ready, or fails
           pgb source add prod --host prod-db --network pgoverlay-e2e --user postgres --pg-version 17
-          state=""
-          for i in $(seq 1 120); do
-            state="$(curl -fsS -H "Authorization: Bearer $PGOVERLAY_TOKEN" \
-              "$PGOVERLAY_SERVER/v1/sources/prod" | jq -r .state || true)"
-            if [ "$state" = ready ] || [ "$state" = failed ]; then break; fi
-            sleep 2
-          done
           pgb source ls
+          state="$(curl -fsS -H "Authorization: Bearer $PGOVERLAY_TOKEN" "$PGOVERLAY_SERVER/v1/sources" \
+            | jq -r '.[] | select(.name == "prod") | .state')"
           if [ "$state" != ready ]; then
             echo "::error::source prod is '$state', not ready"
             exit 1
