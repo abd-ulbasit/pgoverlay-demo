@@ -122,7 +122,11 @@ npx smee-client --url https://smee.io/<channel> --target http://localhost:8080/w
 ```
 
 In this setup the webhook named branches `pr-<N>` (as in PR #1); the later
-EKS setup named them after the git branch instead.
+EKS setup named them after the git branch instead. Current pgoverlay-github
+releases put both under a repository key, `gh-<repo-key>-pr-<N>` and
+`gh-<repo-key>-<ref>`, so pull requests of different repositories never share
+a branch; `scripts/pgoverlay-branch.sh OWNER/NAME REF [PR]` prints the name
+(see [Branch names](https://github.com/abd-ulbasit/pgoverlay/blob/main/docs/github-app.md#branch-names)).
 
 ## Running it against your own pgoverlay
 
@@ -134,12 +138,15 @@ DEMO_LIVE=true \
 PGOVERLAY_HOST=<proxy host> PGOVERLAY_PORT=6432 PGPASSWORD=<pw> \
   vercel dev            # or any Node host; /api/*.js are plain handlers
 
+# the branch pgoverlay-github created for PR #1 of this repository
+BRANCH=$(./scripts/pgoverlay-branch.sh <owner>/<repo> '' 1)   # gh-<repo-key>-pr-1
+
 # migrations, by hand, against one branch
 PGHOST=<proxy host> PGPORT=6432 PGUSER=postgres \
-PGDATABASE='postgres@pr-1' ./scripts/migrate.sh
+PGDATABASE="postgres@$BRANCH" ./scripts/migrate.sh
 
 # the Go app
-DATABASE_URL='postgres://postgres:pw@<proxy host>:6432/postgres@pr-1' go run .
+DATABASE_URL="postgres://postgres:pw@<proxy host>:6432/postgres@$BRANCH" go run .
 ```
 
 `DEMO_LIVE` is the switch that turns the `410 Gone` responses back into real
@@ -157,6 +164,7 @@ To restore the CI integration, set `vars.PGOVERLAY_PROXY_HOST` and
 | `main.go` | the same app as a plain Go server |
 | `migrations/` | including `0003_users_email_unique.sql`, the one that failed |
 | `scripts/migrate.sh` | the migration runner CI invoked against each branch |
+| `scripts/pgoverlay-branch.sh` | the branch name pgoverlay-github gives a PR (`scripts/pgoverlay-branch.test.sh` checks it) |
 | `.github/workflows/` | the branch-per-PR CI and preview wiring |
 
 ## Licence
