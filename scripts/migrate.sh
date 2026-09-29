@@ -2,7 +2,8 @@
 # Applies pending SQL migrations in order, tracked in schema_migrations.
 # Connection comes from the standard libpq env vars (PGHOST, PGPORT,
 # PGUSER, PGPASSWORD, PGDATABASE) — so pointing this at a pgoverlay branch
-# is just:  PGDATABASE='postgres@pr-42' PGPORT=6432 ./scripts/migrate.sh
+# is just:
+#   PGDATABASE="postgres@$(./scripts/pgoverlay-branch.sh owner/repo '' 42)" PGPORT=6432 ./scripts/migrate.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

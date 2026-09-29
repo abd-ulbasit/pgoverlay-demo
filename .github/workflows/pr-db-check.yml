@@ -18,14 +18,24 @@
 #   vars.PGOVERLAY_PROXY_HOST      e.g. "pgoverlay.internal:6432"
 #   vars.PGOVERLAY_PG_USER         optional, defaults to "postgres"
 #   secrets.PGOVERLAY_PG_PASSWORD
-# and add the `pull_request:` trigger back.
+# and add the `pull_request:` trigger back (then feed BRANCH_REF from
+# github.head_ref and PR_NUMBER from github.event.pull_request.number).
+#
+# The branch name is derived by scripts/pgoverlay-branch.sh, the same rule
+# pgoverlay-github uses to create it: gh-<repo-key>-<ref> or
+# gh-<repo-key>-pr-<n>, where <repo-key> is 6 hex chars of the repository's
+# SHA-256.
 name: pr-db-check
 on:
   workflow_dispatch:
     inputs:
       branch_ref:
-        description: 'Git ref whose pgoverlay database branch to migrate (e.g. feat/order-tags)'
-        required: true
+        description: 'Head branch of the PR whose pgoverlay database to migrate (e.g. feat/order-tags; ghook git-branch naming). Leave empty to use pr_number.'
+        required: false
+        type: string
+      pr_number:
+        description: 'PR number (ghook pr-number naming, its default; also the fallback for fork PRs)'
+        required: false
         type: string
 
 jobs:
@@ -50,14 +60,19 @@ jobs:
         env:
           PGOVERLAY_PROXY_HOST: ${{ vars.PGOVERLAY_PROXY_HOST }}
           PGPASSWORD: ${{ secrets.PGOVERLAY_PG_PASSWORD }}
+          # via env, never interpolated into the script body: a git ref is
+          # attacker-controlled text
           BRANCH_REF: ${{ inputs.branch_ref }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           export PGHOST="${PGOVERLAY_PROXY_HOST%%:*}"
           export PGPORT="${PGOVERLAY_PROXY_HOST##*:}"
           export PGUSER="${{ vars.PGOVERLAY_PG_USER || 'postgres' }}"
-          # the database name routes through the pgoverlay proxy to the ref's
-          # branch, named after the git branch (ghook git-branch naming)
-          BRANCH=$(echo "$BRANCH_REF" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-41 | sed 's/-*$//')
+          # the database name routes through the pgoverlay proxy to the PR's
+          # branch. ghook names it gh-<repo-key>-<ref> (git-branch naming) or
+          # gh-<repo-key>-pr-<n> (pr-number naming); the script applies the
+          # exact rule, including the repository key.
+          BRANCH=$(./scripts/pgoverlay-branch.sh "$GITHUB_REPOSITORY" "$BRANCH_REF" "$PR_NUMBER")
           export PGDATABASE="postgres@$BRANCH"
           echo "migrating $PGDATABASE"
           # the webhook acks instantly and creates the branch async (~10-15s
