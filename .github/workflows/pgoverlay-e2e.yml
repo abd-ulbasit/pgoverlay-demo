@@ -1,0 +1,283 @@
+# End-to-end check of pgoverlay the way a consumer uses it, self-contained on
+# one GitHub runner (no cluster, no secrets):
+#
+#   1. a "production" Postgres 17 (wal_level=replica) at the schema production
+#      runs (migrations 0001 + 0002) with legacy data: duplicate signups, the
+#      rows that broke 0003 on PR #1;
+#   2. branchd + pgb built from abd-ulbasit/pgoverlay at `pgoverlay_ref`,
+#      branchd running on the runner (Docker runtime, REST :7070, router
+#      :6432), the production database registered as source `prod`;
+#   3. a branch created with the pgoverlay GitHub Action, this repo's
+#      migrations applied to it through the router with scripts/migrate.sh,
+#      and the result checked on the branch and on production;
+#   4. the branch destroyed with action/destroy in an always() step.
+#
+# The matrix covers both credential modes: `inherit` (branches keep the
+# source's password, which the workflow already holds) and `rotate` (branchd
+# --rotate-branch-credentials; the Action hands over the branch's own masked
+# password).
+#
+# `uses:` cannot take an expression, so the two Action steps are pinned to a
+# literal ref; keep them on the same ref as the `pgoverlay_ref` default.
+name: pgoverlay-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      pgoverlay_ref:
+        description: pgoverlay git ref to build branchd and pgb from
+        required: false
+        default: main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pgoverlay-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PGOVERLAY_REF: ${{ inputs.pgoverlay_ref || 'main' }}
+  PGOVERLAY_SERVER: http://127.0.0.1:7070
+  SOURCE_PASSWORD: e2e-source-password
+  # production is at 0002; 0003 (dedupe + UNIQUE (email)) is what CI proves
+  # on a branch before it reaches production
+  PROD_MIGRATIONS: 0001_init 0002_orders
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.credentials }} credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        credentials: [inherit, rotate]
+    defaults:
+      run:
+        shell: bash # -e -o pipefail: a failing migrate.sh must fail its pipe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out pgoverlay at ${{ env.PGOVERLAY_REF }}
+        uses: actions/checkout@v4
+        with:
+          repository: abd-ulbasit/pgoverlay
+          ref: ${{ env.PGOVERLAY_REF }}
+          path: .pgoverlay
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .pgoverlay/go.mod
+          cache-dependency-path: .pgoverlay/go.sum
+
+      - name: Build branchd and pgb
+        working-directory: .pgoverlay
+        run: |
+          go build -o "$RUNNER_TEMP/bin/branchd" ./cmd/branchd
+          go build -o "$RUNNER_TEMP/bin/pgb" ./cmd/pgb
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Tools and images
+        run: |
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -yq postgresql-client
+          fi
+          psql --version
+          jq --version
+          docker pull -q postgres:17
+          docker pull -q alpine:3.21
+
+      - name: Start production Postgres (wal_level=replica)
+        run: |
+          docker network create pgoverlay-e2e
+          docker run -d --name prod-db --network pgoverlay-e2e --network-alias prod-db \
+            -e POSTGRES_PASSWORD="$SOURCE_PASSWORD" -p 127.0.0.1:55432:5432 \
+            postgres:17 -c wal_level=replica -c max_wal_senders=4
+          for i in $(seq 1 60); do
+            if docker exec prod-db pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec prod-db pg_isready -U postgres -h 127.0.0.1
+          # the stock pg_hba.conf has no remote replication entry, which
+          # pg_basebackup (source seeding) needs
+          docker exec prod-db sh -c \
+            'echo "host replication all all scram-sha-256" >> "$PGDATA/pg_hba.conf"'
+          docker exec prod-db psql -U postgres -qc "SELECT pg_reload_conf()"
+
+      - name: Load production schema and legacy data
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "55432"
+          PGUSER: postgres
+          PGPASSWORD: ${{ env.SOURCE_PASSWORD }}
+          PGDATABASE: postgres
+        run: |
+          # run the real migration runner over only the migrations production
+          # has, from a copy of the repo that holds just those
+          prod="$RUNNER_TEMP/prod-schema"
+          mkdir -p "$prod/migrations"
+          cp -r scripts "$prod/"
+          for v in $PROD_MIGRATIONS; do cp "migrations/$v.sql" "$prod/migrations/"; done
+          "$prod/scripts/migrate.sh"
+          # 2000 users plus 37 legacy duplicate signups, and orders that
+          # reference both the originals and the duplicates
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          INSERT INTO users (email, full_name)
+            SELECT 'user' || g || '@example.com', 'User ' || g FROM generate_series(1, 2000) g;
+          INSERT INTO users (email, full_name)
+            SELECT 'user' || g || '@example.com', 'Duplicate ' || g FROM generate_series(1, 37) g;
+          INSERT INTO orders (user_id, amount_cents)
+            SELECT (g % 2037) + 1, 100 + g FROM generate_series(1, 10000) g;
+          SQL
+          [ "$(psql -Atc 'SELECT count(*) FROM users')" = 2037 ]
+          [ "$(psql -Atc 'SELECT count(*) FROM orders')" = 10000 ]
+
+      - name: Start branchd (${{ matrix.credentials }} credentials)
+        env:
+          CREDENTIALS: ${{ matrix.credentials }}
+        run: |
+          token="$(openssl rand -hex 16)"
+          echo "::add-mask::$token"
+          echo "PGOVERLAY_TOKEN=$token" >> "$GITHUB_ENV"
+          flags=(--api-addr 127.0.0.1:7070 --pg-addr 127.0.0.1:6432)
+          if [ "$CREDENTIALS" = rotate ]; then
+            flags+=(--rotate-branch-credentials)
+          fi
+          PGOVERLAY_TOKEN="$token" nohup branchd "${flags[@]}" \
+            >"$RUNNER_TEMP/branchd.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS "$PGOVERLAY_SERVER/readyz" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS "$PGOVERLAY_SERVER/readyz"
+
+      - name: Register production as source "prod" (pgb, server mode)
+        env:
+          PGPASSWORD: ${{ env.SOURCE_PASSWORD }}
+        run: |
+          # seeding (pg_basebackup) is synchronous: this returns once the
+          # source is ready, or fails
+          pgb source add prod --host prod-db --network pgoverlay-e2e --user postgres --pg-version 17
+          pgb source ls
+          state="$(curl -fsS -H "Authorization: Bearer $PGOVERLAY_TOKEN" "$PGOVERLAY_SERVER/v1/sources" \
+            | jq -r '.[] | select(.name == "prod") | .state')"
+          if [ "$state" != ready ]; then
+            echo "::error::source prod is '$state', not ready"
+            exit 1
+          fi
+
+      - name: Create a branch (pgoverlay action)
+        id: branch
+        uses: abd-ulbasit/pgoverlay/action@main
+        with:
+          server: ${{ env.PGOVERLAY_SERVER }}
+          token: ${{ env.PGOVERLAY_TOKEN }}
+          source: prod
+          ttl: "900"
+          # rotate leg: exercise the explicit router address; inherit leg:
+          # the default (the server's host, port 6432)
+          proxy_host: ${{ matrix.credentials == 'rotate' && '127.0.0.1:6432' || '' }}
+
+      - name: Check the action outputs
+        env:
+          CREDENTIALS: ${{ matrix.credentials }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          PROXY_HOST: ${{ steps.branch.outputs.proxy_host }}
+          PROXY_PORT: ${{ steps.branch.outputs.proxy_port }}
+          PROXY_DATABASE: ${{ steps.branch.outputs.proxy_database }}
+          BRANCH_USER: ${{ steps.branch.outputs.user }}
+          BRANCH_PASSWORD: ${{ steps.branch.outputs.password }}
+        run: |
+          echo "branch=$BRANCH router=$PROXY_HOST:$PROXY_PORT db=$PROXY_DATABASE user=$BRANCH_USER"
+          [[ "$BRANCH" =~ ^t-gha-[0-9]+-[0-9a-f]{6}$ ]]
+          [ "$PROXY_HOST" = 127.0.0.1 ]
+          [ "$PROXY_PORT" = 6432 ]
+          [ "$PROXY_DATABASE" = "postgres@$BRANCH" ]
+          [ "$BRANCH_USER" = postgres ]
+          if [ "$CREDENTIALS" = rotate ]; then
+            [ -n "$BRANCH_PASSWORD" ]
+            [ "$BRANCH_PASSWORD" != "$SOURCE_PASSWORD" ]
+          else
+            [ -z "$BRANCH_PASSWORD" ]
+          fi
+          pgb branch ls
+
+      - name: Apply this repo's migrations to the branch, through the router
+        env:
+          PGHOST: ${{ steps.branch.outputs.proxy_host }}
+          PGPORT: ${{ steps.branch.outputs.proxy_port }}
+          PGDATABASE: ${{ steps.branch.outputs.proxy_database }}
+          PGUSER: ${{ steps.branch.outputs.user }}
+          PGPASSWORD: ${{ steps.branch.outputs.password || env.SOURCE_PASSWORD }}
+        run: |
+          ./scripts/migrate.sh | tee "$RUNNER_TEMP/migrate.log"
+          grep -qx "apply 0003_users_email_unique" "$RUNNER_TEMP/migrate.log"
+          # a second run is a no-op
+          ./scripts/migrate.sh | tee "$RUNNER_TEMP/migrate2.log"
+          if grep -q '^apply ' "$RUNNER_TEMP/migrate2.log"; then
+            echo "::error::migrate.sh re-applied a migration"
+            exit 1
+          fi
+
+      - name: Check the migrated branch
+        env:
+          PGHOST: ${{ steps.branch.outputs.proxy_host }}
+          PGPORT: ${{ steps.branch.outputs.proxy_port }}
+          PGDATABASE: ${{ steps.branch.outputs.proxy_database }}
+          PGUSER: ${{ steps.branch.outputs.user }}
+          PGPASSWORD: ${{ steps.branch.outputs.password || env.SOURCE_PASSWORD }}
+        run: |
+          q() { psql -v ON_ERROR_STOP=1 -Atc "$1"; }
+          [ "$(q 'SELECT count(*) FROM users')" = 2000 ]
+          [ "$(q 'SELECT count(*) FROM orders')" = 10000 ]
+          [ "$(q 'SELECT count(*) FROM (SELECT email FROM users GROUP BY email HAVING count(*) > 1) d')" = 0 ]
+          [ "$(q 'SELECT count(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE u.id IS NULL')" = 0 ]
+          [ "$(q "SELECT count(*) FROM pg_constraint WHERE conname = 'users_email_key'")" = 1 ]
+          # the constraint the migration added is live on the branch
+          if q "INSERT INTO users (email, full_name) VALUES ('user1@example.com', 'again')" 2>/dev/null; then
+            echo "::error::duplicate signup accepted on the migrated branch"
+            exit 1
+          fi
+          echo "branch migrated: 2000 users, 10000 orders, no duplicates, no orphans"
+
+      - name: Check production is untouched
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "55432"
+          PGUSER: postgres
+          PGPASSWORD: ${{ env.SOURCE_PASSWORD }}
+          PGDATABASE: postgres
+        run: |
+          q() { psql -v ON_ERROR_STOP=1 -Atc "$1"; }
+          [ "$(q 'SELECT count(*) FROM users')" = 2037 ]
+          [ "$(q "SELECT count(*) FROM pg_constraint WHERE conname = 'users_email_key'")" = 0 ]
+          [ "$(q "SELECT count(*) FROM schema_migrations WHERE version = '0003_users_email_unique'")" = 0 ]
+          echo "production unchanged: 2037 users, 0003 not applied"
+
+      - name: Destroy the branch (pgoverlay action)
+        if: always()
+        uses: abd-ulbasit/pgoverlay/action/destroy@main
+        with:
+          server: ${{ env.PGOVERLAY_SERVER }}
+          token: ${{ env.PGOVERLAY_TOKEN }}
+          branch: ${{ steps.branch.outputs.branch }}
+
+      - name: Check the branch is gone
+        if: always() && steps.branch.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $PGOVERLAY_TOKEN" "$PGOVERLAY_SERVER/v1/branches/$BRANCH")"
+          if [ "$code" != 404 ]; then
+            echo "::error::branch $BRANCH still exists (GET = $code)"
+            exit 1
+          fi
+          pgb branch ls
+
+      - name: branchd log
+        if: always()
+        run: cat "$RUNNER_TEMP/branchd.log" 2>/dev/null || true

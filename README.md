@@ -156,6 +156,19 @@ To restore the CI integration, set `vars.PGOVERLAY_PROXY_HOST` and
 `secrets.PGOVERLAY_PG_PASSWORD` and put the `pull_request:` trigger back in
 `.github/workflows/pr-db-check.yml`.
 
+## End-to-end check in CI
+
+`.github/workflows/pgoverlay-e2e.yml` replays the PR #1 story on a single
+GitHub runner, with no cluster and no secrets: it starts a "production"
+Postgres at migration 0002 with legacy duplicate signups, builds and runs
+branchd from [pgoverlay](https://github.com/abd-ulbasit/pgoverlay) (the
+`pgoverlay_ref` input picks the version), creates a branch with the pgoverlay
+GitHub Action, applies `0003` to it through the router with
+`scripts/migrate.sh`, checks the result on the branch and that production is
+untouched, and destroys the branch with the Action's destroy step. It runs
+on every pull request and on demand, in both credential modes (inherited and
+per-branch rotated passwords).
+
 ## Layout
 
 | path | what |
@@ -165,7 +178,7 @@ To restore the CI integration, set `vars.PGOVERLAY_PROXY_HOST` and
 | `migrations/` | including `0003_users_email_unique.sql`, the one that failed |
 | `scripts/migrate.sh` | the migration runner CI invoked against each branch |
 | `scripts/pgoverlay-branch.sh` | the branch name pgoverlay-github gives a PR (`scripts/pgoverlay-branch.test.sh` checks it) |
-| `.github/workflows/` | the branch-per-PR CI and preview wiring |
+| `.github/workflows/` | the branch-per-PR CI and preview wiring (archived), and the self-contained pgoverlay e2e |
 
 ## Licence
 
