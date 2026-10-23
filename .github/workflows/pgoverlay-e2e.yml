@@ -18,16 +18,19 @@
 # password).
 #
 # `uses:` cannot take an expression, so the two Action steps are pinned to a
-# literal ref; keep them on the same ref as the `pgoverlay_ref` default.
+# literal commit (pgoverlay v1.0.0); keep them on the same commit as the
+# `pgoverlay_ref` default. A branch name such as `main` would let any push to
+# pgoverlay change what runs here, with the branchd token in hand. Third-party
+# actions are pinned to commit SHAs too, with the version in a comment.
 name: pgoverlay-e2e
 
 on:
   workflow_dispatch:
     inputs:
       pgoverlay_ref:
-        description: pgoverlay git ref to build branchd and pgb from
+        description: pgoverlay git ref to build branchd and pgb from (default v1.0.0, by commit)
         required: false
-        default: main
+        default: a245fa5d53703e9bb600a23b17a19ab3add85571
   pull_request:
 
 permissions:
@@ -38,7 +41,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PGOVERLAY_REF: ${{ inputs.pgoverlay_ref || 'main' }}
+  PGOVERLAY_REF: ${{ inputs.pgoverlay_ref || 'a245fa5d53703e9bb600a23b17a19ab3add85571' }}
   PGOVERLAY_SERVER: http://127.0.0.1:7070
   SOURCE_PASSWORD: e2e-source-password
   # production is at 0002; 0003 (dedupe + UNIQUE (email)) is what CI proves
@@ -58,16 +61,19 @@ jobs:
       run:
         shell: bash # -e -o pipefail: a failing migrate.sh must fail its pipe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Check out pgoverlay at ${{ env.PGOVERLAY_REF }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: abd-ulbasit/pgoverlay
           ref: ${{ env.PGOVERLAY_REF }}
           path: .pgoverlay
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: .pgoverlay/go.mod
           cache-dependency-path: .pgoverlay/go.sum
@@ -171,7 +177,7 @@ jobs:
 
       - name: Create a branch (pgoverlay action)
         id: branch
-        uses: abd-ulbasit/pgoverlay/action@main
+        uses: abd-ulbasit/pgoverlay/action@a245fa5d53703e9bb600a23b17a19ab3add85571 # v1.0.0
         with:
           server: ${{ env.PGOVERLAY_SERVER }}
           token: ${{ env.PGOVERLAY_TOKEN }}
@@ -259,7 +265,7 @@ jobs:
 
       - name: Destroy the branch (pgoverlay action)
         if: always()
-        uses: abd-ulbasit/pgoverlay/action/destroy@main
+        uses: abd-ulbasit/pgoverlay/action/destroy@a245fa5d53703e9bb600a23b17a19ab3add85571 # v1.0.0
         with:
           server: ${{ env.PGOVERLAY_SERVER }}
           token: ${{ env.PGOVERLAY_TOKEN }}

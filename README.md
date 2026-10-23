@@ -22,6 +22,69 @@ can connect.
 > [pgoverlay](https://github.com/abd-ulbasit/pgoverlay) itself is a separate,
 > maintained repo. Only this demo's hosting is retired.
 
+## Retired: what is gone, and what the owner still has to remove
+
+The deployment is retired, not paused. The EKS cluster, its node, its load
+balancers and the "production" database were destroyed in June 2026; as of
+October 2026 the AWS account holds no EKS cluster, RDS instance, load
+balancer, EC2 instance, NAT gateway or Elastic IP.
+
+The repository's own settings are clean too. As of 24 October 2026 it has
+no webhooks and no GitHub Actions secrets or variables, at repository or
+environment level (checked through the GitHub API). That covers the
+Actions secrets (`KUBECONFIG_B64`, `PGOVERLAY_TOKEN`, the database
+password), the `pull_request` webhook that sent events over plain `http://`
+to the old ghook load balancer, and the stale `PGBRANCH_API`,
+`PGBRANCH_PG_USER`, `PREVIEW_ENABLED` and `PREVIEW_URL` variables.
+
+What is left is outside this repository's settings, so the owner has to
+check it by hand:
+
+- [ ] **The Vercel project's environment variables** `PGOVERLAY_HOST`,
+      `PGOVERLAY_PORT` and `PGPASSWORD`, which `scripts/vercel-env-upsert.js`
+      set for both the preview and the production target. Delete them; the
+      deployed pages answer `410 Gone` either way.
+- [ ] **Anything the demo's credentials were reused for.** If the
+      "production" database password, the branchd token or the webhook
+      secret were used anywhere else, rotate them there. The laptop variant
+      below handed ghook `$(gh auth token)`, the gh CLI's own OAuth token for
+      the maintainer's account; revoking the GitHub CLI's authorization
+      (Settings → Applications) and logging in again replaces it.
+- [ ] **Archive the repository** afterwards, so its workflows cannot run and
+      nobody mistakes it for a live service.
+
+## What not to copy from the wiring below
+
+The wiring is kept because it is the reusable part, but several of its
+choices were made for a quick demo and are wrong for anything holding real
+data:
+
+- **Static cluster credentials in CI.** `pr-preview.yml` read a base64
+  kubeconfig from a secret, and it ran `kubectl create ns`, which needs
+  cluster-scoped rights that pgoverlay's namespaced
+  [`deploy/preview-deployer-rbac.yaml`](https://github.com/abd-ulbasit/pgoverlay/blob/main/deploy/preview-deployer-rbac.yaml)
+  does not grant, so the real kubeconfig was broader than the documented
+  role. Use GitHub's OIDC token instead: an IAM role assumed with
+  `aws-actions/configure-aws-credentials` (`role-to-assume`), mapped by an
+  EKS access entry to that namespaced role, with the namespace created once
+  by hand.
+- **The production password everywhere.** Previews ran with inherited
+  credentials, so every branch accepted the production password. The
+  workflow put it in a Kubernetes Secret through `kubectl --from-literal`
+  (the process's arguments) with `sslmode=disable`, and Vercel held it for
+  preview and production deployments. Use rotated per-branch credentials,
+  TLS with `verify-full`, and preview-only environment variables.
+- **Plaintext over the internet.** The serverless pool connected to the
+  public load balancer, or a pinggy tunnel, without TLS, and `tunnel-up.sh`
+  accepted any host key. `api/_db.js` now requires a verified TLS
+  connection unless `PGSSLMODE=disable`. `tunnel-up.sh` is removed: a
+  tunnel's random hostname can never match the router's certificate, so it
+  only ever worked in plaintext.
+- **A superuser consumer.** The app and CI connected as `postgres`, which
+  can read the pre-mask values that masking leaves in a branch
+  ([what masking leaves behind](https://github.com/abd-ulbasit/pgoverlay/blob/main/docs/security.md#what-masking-leaves-behind)).
+  Connect as a role that is not a superuser.
+
 ## Why
 
 The classic failure mode this demo reproduces: a schema migration that
@@ -99,7 +162,9 @@ Deploying it surfaced three real pgoverlay bugs, written up in the
 
 Everything ran on one laptop (Docker via Colima), with GitHub reaching it
 through a [smee.io](https://smee.io) webhook proxy. `scripts/tunnel-up.sh`
-restarted the public TCP tunnel and rewired GitHub to it.
+restarted the public TCP tunnel and rewired GitHub to it; it is in the git
+history, not the tree, because it carried database connections in plaintext
+(see [What not to copy](#what-not-to-copy-from-the-wiring-below)).
 
 ```sh
 # 1. a "production" postgres with realistic data (incl. duplicate emails)
@@ -114,12 +179,17 @@ pgb source set-mask prod mask-pii.sql        # deterministic PII masking
 # 3. branch-per-PR webhook service + forwarder
 GHOOK_WEBHOOK_SECRET=... GHOOK_SOURCE=prod \
 GHOOK_PGOVERLAY_SERVER=http://localhost:7070 GHOOK_PGOVERLAY_TOKEN=... \
-GHOOK_GITHUB_TOKEN=$(gh auth token) GHOOK_PROXY_HOST=localhost:6432 \
+GHOOK_GITHUB_TOKEN=<fine-grained token: this repo only> GHOOK_PROXY_HOST=localhost:6432 \
 GHOOK_REPOS=<owner>/<repo> GHOOK_RESET_ON_PUSH=true pgoverlay-github
 npx smee-client --url https://smee.io/<channel> --target http://localhost:8080/webhook
 
 # 4. repo webhook: pull_request events -> the smee channel (same secret)
 ```
+
+The recorded run gave ghook `$(gh auth token)` here, the maintainer's gh CLI
+OAuth token with every scope the account granted it, for a service reachable
+from the internet. Use a GitHub App or a fine-grained token limited to the
+repository (Pull requests: read, Commit statuses: write, Issues: write).
 
 In this setup the webhook named branches `pr-<N>` (as in PR #1); the later
 EKS setup named them after the git branch instead. Current pgoverlay-github
@@ -133,20 +203,25 @@ a branch; `scripts/pgoverlay-branch.sh OWNER/NAME REF [PR]` prints the name
 Nothing here is pinned to the dead cluster. Point it at a pgoverlay install:
 
 ```sh
-# the API endpoints
+# the API endpoints (TLS is required and verified; PGSSLMODE=disable only
+# for a proxy on localhost). PGUSER defaults to postgres: use a role that is
+# not a superuser.
 DEMO_LIVE=true \
-PGOVERLAY_HOST=<proxy host> PGOVERLAY_PORT=6432 PGPASSWORD=<pw> \
+PGOVERLAY_HOST=<proxy host> PGOVERLAY_PORT=6432 PGUSER=<user> PGPASSWORD=<pw> \
+PGOVERLAY_CA_CERT="$(cat pgoverlay-ca.crt)" \
   vercel dev            # or any Node host; /api/*.js are plain handlers
 
 # the branch pgoverlay-github created for PR #1 of this repository
 BRANCH=$(./scripts/pgoverlay-branch.sh <owner>/<repo> '' 1)   # gh-<repo-key>-pr-1
 
-# migrations, by hand, against one branch
-PGHOST=<proxy host> PGPORT=6432 PGUSER=postgres \
+# migrations, by hand, against one branch (libpq reads the PG* variables;
+# a role that is not a superuser, and verified TLS)
+PGHOST=<proxy host> PGPORT=6432 PGUSER=<user> PGPASSWORD=<pw> \
+PGSSLMODE=verify-full PGSSLROOTCERT=pgoverlay-ca.crt \
 PGDATABASE="postgres@$BRANCH" ./scripts/migrate.sh
 
 # the Go app
-DATABASE_URL="postgres://postgres:pw@<proxy host>:6432/postgres@$BRANCH" go run .
+DATABASE_URL="postgres://<user>:<pw>@<proxy host>:6432/postgres@$BRANCH?sslmode=verify-full&sslrootcert=pgoverlay-ca.crt" go run .
 ```
 
 `DEMO_LIVE` is the switch that turns the `410 Gone` responses back into real
