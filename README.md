@@ -27,24 +27,19 @@ can connect.
 The deployment is retired, not paused. The EKS cluster, its node, its load
 balancers and the "production" database were destroyed in June 2026; as of
 October 2026 the AWS account holds no EKS cluster, RDS instance, load
-balancer, EC2 instance, NAT gateway or Elastic IP. The GitHub Actions
-secrets (`KUBECONFIG_B64`, `PGOVERLAY_TOKEN`, the database password) are
-deleted too.
+balancer, EC2 instance, NAT gateway or Elastic IP.
 
-Some settings that pointed at the deployment are still there. They are
-repository and platform settings, which a commit cannot change, so the
-owner has to remove them by hand:
+The repository's own settings are clean too. As of 24 October 2026 it has
+no webhooks and no GitHub Actions secrets or variables, at repository or
+environment level (checked through the GitHub API). That covers the
+Actions secrets (`KUBECONFIG_B64`, `PGOVERLAY_TOKEN`, the database
+password), the `pull_request` webhook that sent events over plain `http://`
+to the old ghook load balancer, and the stale `PGBRANCH_API`,
+`PGBRANCH_PG_USER`, `PREVIEW_ENABLED` and `PREVIEW_URL` variables.
 
-- [ ] **The repository webhook** (Settings → Webhooks) that sends
-      `pull_request` events over plain `http://` to the old ghook load
-      balancer. Its target is gone; if that hostname were ever handed to
-      someone else, every pull request's metadata would go to them, signed
-      with the old webhook secret. Delete it.
-- [ ] **The repository variables** (Settings → Secrets and variables →
-      Actions → Variables) `PGBRANCH_API`, `PGBRANCH_PG_USER`,
-      `PREVIEW_ENABLED` and `PREVIEW_URL`. Two hold the dead load balancers'
-      `http://` URLs, they predate the rename (the workflows read
-      `PGOVERLAY_*` names), and nothing uses them. Delete them.
+What is left is outside this repository's settings, so the owner has to
+check it by hand:
+
 - [ ] **The Vercel project's environment variables** `PGOVERLAY_HOST`,
       `PGOVERLAY_PORT` and `PGPASSWORD`, which `scripts/vercel-env-upsert.js`
       set for both the preview and the production target. Delete them; the
@@ -206,17 +201,20 @@ Nothing here is pinned to the dead cluster. Point it at a pgoverlay install:
 
 ```sh
 # the API endpoints (TLS is required and verified; PGSSLMODE=disable only
-# for a proxy on localhost)
+# for a proxy on localhost). PGUSER defaults to postgres: use a role that is
+# not a superuser.
 DEMO_LIVE=true \
-PGOVERLAY_HOST=<proxy host> PGOVERLAY_PORT=6432 PGPASSWORD=<pw> \
+PGOVERLAY_HOST=<proxy host> PGOVERLAY_PORT=6432 PGUSER=<user> PGPASSWORD=<pw> \
 PGOVERLAY_CA_CERT="$(cat pgoverlay-ca.crt)" \
   vercel dev            # or any Node host; /api/*.js are plain handlers
 
 # the branch pgoverlay-github created for PR #1 of this repository
 BRANCH=$(./scripts/pgoverlay-branch.sh <owner>/<repo> '' 1)   # gh-<repo-key>-pr-1
 
-# migrations, by hand, against one branch
-PGHOST=<proxy host> PGPORT=6432 PGUSER=postgres \
+# migrations, by hand, against one branch (libpq reads the PG* variables;
+# a role that is not a superuser, and verified TLS)
+PGHOST=<proxy host> PGPORT=6432 PGUSER=<user> PGPASSWORD=<pw> \
+PGSSLMODE=verify-full PGSSLROOTCERT=pgoverlay-ca.crt \
 PGDATABASE="postgres@$BRANCH" ./scripts/migrate.sh
 
 # the Go app
