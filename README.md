@@ -77,8 +77,9 @@ data:
 - **Plaintext over the internet.** The serverless pool connected to the
   public load balancer, or a pinggy tunnel, without TLS, and `tunnel-up.sh`
   accepted any host key. `api/_db.js` now requires a verified TLS
-  connection unless `PGSSLMODE=disable`, and the tunnel trusts pinggy's key
-  only on first use.
+  connection unless `PGSSLMODE=disable`. `tunnel-up.sh` is removed: a
+  tunnel's random hostname can never match the router's certificate, so it
+  only ever worked in plaintext.
 - **A superuser consumer.** The app and CI connected as `postgres`, which
   can read the pre-mask values that masking leaves in a branch
   ([what masking leaves behind](https://github.com/abd-ulbasit/pgoverlay/blob/main/docs/security.md#what-masking-leaves-behind)).
@@ -161,7 +162,9 @@ Deploying it surfaced three real pgoverlay bugs, written up in the
 
 Everything ran on one laptop (Docker via Colima), with GitHub reaching it
 through a [smee.io](https://smee.io) webhook proxy. `scripts/tunnel-up.sh`
-restarted the public TCP tunnel and rewired GitHub to it.
+restarted the public TCP tunnel and rewired GitHub to it; it is in the git
+history, not the tree, because it carried database connections in plaintext
+(see [What not to copy](#what-not-to-copy-from-the-wiring-below)).
 
 ```sh
 # 1. a "production" postgres with realistic data (incl. duplicate emails)

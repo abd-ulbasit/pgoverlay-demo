@@ -29,6 +29,6 @@ const hdrs = { Authorization: `Bearer ${auth.token}`, 'Content-Type': 'applicati
     const env = d.target === 'production' ? 'production' : 'preview';
     if (!latest[env] && d.state === 'READY') latest[env] = d.url;
   }
-  // stdout: one "env url" per line, consumed by tunnel-up.sh
+  // stdout: one "env url" per line (tunnel-up.sh, now removed, redeployed each)
   for (const [env, url] of Object.entries(latest)) console.log(`${env} https://${url}`);
 })();
