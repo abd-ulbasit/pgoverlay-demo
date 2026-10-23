@@ -34,12 +34,26 @@ const isPreview = process.env.VERCEL_ENV === 'preview';
 const branch = (isPreview && ref && refBranchName(repo, ref))
   || process.env.PGOVERLAY_DEFAULT_BRANCH || 'main-stable';
 
+// TLS, with the certificate verified, unless it is turned off explicitly.
+// Without `ssl`, node-postgres sends the password and every row in cleartext,
+// and every branch behind the router is a copy of production.
+// PGOVERLAY_CA_CERT holds the PEM of a private CA (pgoverlay's docs/eks.md
+// issues one with cert-manager); PGSSLMODE=disable is the opt-out for a
+// router on localhost.
+const ssl = process.env.PGSSLMODE === 'disable'
+  ? false
+  : {
+    rejectUnauthorized: true,
+    ...(process.env.PGOVERLAY_CA_CERT ? { ca: process.env.PGOVERLAY_CA_CERT } : {}),
+  };
+
 const pool = new Pool({
   host: process.env.PGOVERLAY_HOST,
   port: Number(process.env.PGOVERLAY_PORT || 6432),
   user: process.env.PGUSER || 'postgres',
   password: process.env.PGPASSWORD,
   database: `postgres@${branch}`,
+  ssl,
   max: 3,
   connectionTimeoutMillis: 8000,
   // serverless + tunneled TCP: don't keep idle connections around

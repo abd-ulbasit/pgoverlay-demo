@@ -13,8 +13,11 @@ cd "$(dirname "$0")/.."
 PROXY_PORT="${PROXY_PORT:-6432}"
 LOG="$(mktemp)"
 
+# accept-new: trust pinggy's host key the first time and refuse a changed one
+# afterwards (StrictHostKeyChecking=no accepted any key, so anyone in the path
+# could have taken the tunnel, and the database connections in it).
 ssh -T -p 443 -R0:localhost:"$PROXY_PORT" \
-    -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
+    -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 \
     -o ExitOnForwardFailure=yes tcp@a.pinggy.io >"$LOG" 2>&1 &
 TUNNEL_PID=$!
 trap 'kill $TUNNEL_PID 2>/dev/null || true' EXIT
