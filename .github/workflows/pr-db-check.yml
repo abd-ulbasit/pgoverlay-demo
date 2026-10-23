@@ -38,11 +38,16 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   migrate-against-branch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Preflight — require the pgoverlay proxy to be configured
         env:
@@ -60,6 +65,7 @@ jobs:
         env:
           PGOVERLAY_PROXY_HOST: ${{ vars.PGOVERLAY_PROXY_HOST }}
           PGPASSWORD: ${{ secrets.PGOVERLAY_PG_PASSWORD }}
+          PG_USER: ${{ vars.PGOVERLAY_PG_USER || 'postgres' }}
           # via env, never interpolated into the script body: a git ref is
           # attacker-controlled text
           BRANCH_REF: ${{ inputs.branch_ref }}
@@ -67,7 +73,7 @@ jobs:
         run: |
           export PGHOST="${PGOVERLAY_PROXY_HOST%%:*}"
           export PGPORT="${PGOVERLAY_PROXY_HOST##*:}"
-          export PGUSER="${{ vars.PGOVERLAY_PG_USER || 'postgres' }}"
+          export PGUSER="$PG_USER"
           # the database name routes through the pgoverlay proxy to the PR's
           # branch. ghook names it gh-<repo-key>-<ref> (git-branch naming) or
           # gh-<repo-key>-pr-<n> (pr-number naming); the script applies the

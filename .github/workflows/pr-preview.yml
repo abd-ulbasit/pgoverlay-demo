@@ -35,24 +35,30 @@ on:
 concurrency: pr-preview
 
 permissions:
-  pull-requests: write
   contents: read
 
 jobs:
   preview:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # the preview comment
     env:
       PGOVERLAY_SERVER: ${{ vars.PGOVERLAY_API }}
       PROXY_SVC: pgoverlay-proxy.pgoverlay.svc.cluster.local
       PREVIEW_URL: ${{ vars.PREVIEW_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # was a job-level `if: vars.PREVIEW_ENABLED == 'true'`, which turned an
       # unconfigured repo into a green-looking skip. Fail loudly instead.
       - name: Preflight — require a live cluster to deploy to
+        env:
+          PREVIEW_ENABLED: ${{ vars.PREVIEW_ENABLED }}
         run: |
-          if [ "${{ vars.PREVIEW_ENABLED }}" != "true" ]; then
+          if [ "$PREVIEW_ENABLED" != "true" ]; then
             echo "::error::vars.PREVIEW_ENABLED is not 'true' — previews are off."
             echo "The EKS cluster this demo used was decommissioned in June 2026."
             exit 1
@@ -98,8 +104,8 @@ jobs:
           # inherit-mode: branches share the source password (rotation off,
           # which is what static-env preview flows like Vercel also need)
           PGPASSWORD: ${{ secrets.PGOVERLAY_DB_PASSWORD }}
+          BRANCH: ${{ steps.db.outputs.branch }}
         run: |
-          BRANCH=${{ steps.db.outputs.branch }}
           DSN="host=$PROXY_SVC port=6432 user=postgres password=$PGPASSWORD dbname=postgres@$BRANCH sslmode=disable"
           kubectl -n demo create secret generic orders-db \
             --from-literal=dsn="$DSN" --dry-run=client -o yaml | kubectl apply -f -
